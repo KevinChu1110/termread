@@ -1,0 +1,27 @@
+[project]
+name = "termread"
+version = "0.1.0"
+description = "Terminal web & novel reader — reads only the article text, with chapters, TOC, bookmarks and plugin sources"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Kevin Chu" }]
+requires-python = ">=3.10"
+dependencies = [
+    "opencc>=1.4.2",
+    "textual>=8.2.8",
+    "trafilatura>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/KevinChu1110/termread"
+
+[project.optional-dependencies]
+# 讓外掛沿用 Chrome 的登入狀態
+cookies = ["browser-cookie3>=0.20.1"]
+
+[project.scripts]
+termread = "termread.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
