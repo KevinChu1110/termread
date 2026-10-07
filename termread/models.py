@@ -62,3 +62,4 @@ class ShelfBook:
     read_time: float
     latest: str = ""
     updated: bool = False
+    book_key: str = ""  # 跟 Chapter.book_key 一樣，用來對照本機進度

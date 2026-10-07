@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from rich.text import Text
 from textual import work
@@ -25,7 +26,7 @@ from .store import Mark, Store
 
 # ---------- 繁簡轉換 ----------
 
-TRAD = {"on": False}  # 預設顯示原文，按 t 切換成繁體
+TRAD = {"on": True}  # 預設轉成繁體，按 t 切回原文
 
 
 @lru_cache(maxsize=1)
@@ -42,6 +43,11 @@ def _conv(s: str) -> str:
 
 def zh(s: str) -> str:
     return _conv(s) if TRAD["on"] and s else s
+
+
+def _path(url: str) -> str:
+    # 只比路徑：同一章的手機版／桌面版網址只差主機名，不算換章
+    return urlsplit(url).path.rstrip("/")
 
 
 # ---------- 元件 ----------
@@ -121,9 +127,12 @@ class TocScreen(ModalScreen):
     def _mark_text(m: Mark) -> Text:
         return Text.assemble((zh(m.book) + "  ", "bold"), zh(m.chapter), "\n", (f"{m.pct:.0f}%", "red"), (f" · {m.date}", "dim"))
 
-    @staticmethod
-    def _shelf_text(b: ShelfBook) -> Text:
-        t = Text.assemble((zh(b.book), "bold"), (f"  {zh(b.author)}", "dim"), "\n讀到：", zh(b.read_chapter), (f"  {zh(b.when)}", "dim"))
+    def _shelf_text(self, b: ShelfBook) -> Text:
+        t = Text.assemble((zh(b.book), "bold"), (f"  {zh(b.author)}", "dim"))
+        if local := self.app.store.resume(b.book_key, b.read_time):
+            t.append_text(Text.assemble("\n本機讀到：", zh(local.chapter), (f"  {local.pct:.0f}% · {local.date}", "dim")))
+        else:
+            t.append_text(Text.assemble("\n讀到：", zh(b.read_chapter), (f"  {zh(b.when)}", "dim")))
         if b.updated and b.latest:
             t.append(f"\n最新：{zh(b.latest)}", style="red")
         return t
@@ -172,7 +181,7 @@ class TocScreen(ModalScreen):
         elif kind == "r":
             self.dismiss(self.recent[i])
         elif kind == "s":
-            self.dismiss(self.shelf[i].url)
+            self.dismiss(self.shelf[i])
         elif kind == "l":
             self.dismiss(self.links[i - 1][1])
 
@@ -283,7 +292,7 @@ class ReaderScreen(Screen):
         elif self.start:
             self.load(self.start)
         else:
-            self.app.call_after_refresh(self.action_toc, "shelf")
+            self.app.call_after_refresh(self.action_toc, "recent")
 
     # ----- 載入章節 -----
 
@@ -303,6 +312,12 @@ class ReaderScreen(Screen):
         except Exception as e:  # noqa: BLE001
             self.busy = False
             self.app.call_from_thread(self.app.notify, f"讀取失敗：{e}", severity="error", timeout=8)
+            return
+        if para is None and _path(ch.url) != _path(url) and (local := self.store.resume(ch.book_key)) \
+                and _path(local.url) != _path(ch.url):
+            # 給的是書頁，來源替我們選了一章（通常是網站書架記的）；本機有進度就以本機為準
+            self.busy = False
+            self.app.call_from_thread(self.load, local.url, local.para)
             return
         self.app.call_from_thread(self.show_chapter, ch, src, counts, para)
         # 預先抓下一章，翻到底時就不用等
@@ -445,8 +460,7 @@ class ReaderScreen(Screen):
 
     def action_toggle_trad(self) -> None:
         TRAD["on"] = not TRAD["on"]
-        self.store.settings["traditional"] = TRAD["on"]
-        self.store.save()
+        self.store.set_setting("traditional", TRAD["on"])
         for v in self.views:
             v.redraw()
         self.app.notify("已切換為繁體" if TRAD["on"] else "已切換為原文（簡體）", timeout=2)
@@ -491,7 +505,7 @@ class ReaderScreen(Screen):
         recent = self.store.recent()
         avail = {"toc": bool(toc), "shelf": bool(shelf), "recent": bool(recent), "links": bool(self.ch and self.ch.links)}
         if not avail.get(start, True):
-            start = next((k for k in ("shelf", "recent") if avail[k]), "marks")
+            start = next((k for k in ("recent", "shelf") if avail[k]), "marks")
         self.app.call_from_thread(self._push_toc, toc, recent, shelf, start)
 
     def _push_toc(self, toc, recent, shelf, start) -> None:
@@ -513,10 +527,19 @@ class ReaderScreen(Screen):
         elif isinstance(result, str) and result.startswith("#"):
             i = int(result[1:]) + (len(self.views) - len(self.ch.paras))  # 頁內標題，扣掉章名等前置列
             self.reader.scroll_to_widget(self.views[i], top=True, animate=False)
+        elif isinstance(result, ShelfBook):
+            # 網站書架的進度常比本機舊（只有在官方 App 讀才會同步），本機較新就接本機的
+            if local := self.store.resume(result.book_key, result.read_time):
+                self.load(local.url, local.para)
+            else:
+                self.load(result.url, self._para_for(result.url))
         elif isinstance(result, str):
-            # 本機記過這一章的段落位置就接著讀（網站書架通常只記到章）
-            mark = next((m for m in self.store.progress.values() if m.url == result), None)
-            self.load(result, mark.para if mark else None)
+            self.load(result, self._para_for(result))
+
+    def _para_for(self, url: str) -> int | None:
+        # 本機記過這一章的段落位置就接著讀（網站書架通常只記到章）
+        mark = next((m for m in self.store.progress.values() if m.url == url), None)
+        return mark.para if mark else None
 
     def action_open_url(self) -> None:
         self.app.push_screen(UrlScreen(), lambda url: url and self.load(url))
@@ -612,7 +635,7 @@ class TermRead(App):
     def __init__(self, start: str | None) -> None:
         super().__init__(ansi_color=True)  # 沿用終端機自己的配色與背景
         self.store = Store()
-        TRAD["on"] = self.store.settings.get("traditional", False)
+        TRAD["on"] = self.store.settings.get("traditional", True)
         self.start = start
 
     def on_mount(self) -> None:
